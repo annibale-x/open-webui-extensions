@@ -1198,7 +1198,11 @@ class Filter:
         operations = {
             "delete": {
                 "actions": [a for a in actions if a.action == "delete"],
-                "handler": lambda a: delete_memory_by_id(memory_id=a.id, user=user),
+                "handler": lambda a: delete_memory_by_id(
+                    memory_id=a.id,
+                    request=Request(scope={"type": "http", "app": webui_app}),
+                    user=user,
+                ),
                 "log_msg": lambda a: f"deleted memory. id={a.id}",
                 "error_msg": lambda a, e: f"failed to delete memory {a.id}: {e}",
                 "skip_empty": lambda a: False,
