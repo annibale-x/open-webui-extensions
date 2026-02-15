@@ -5,7 +5,7 @@ description: automatically identify and store valuable information from chats as
 author_email: nokodo@nokodo.net
 author_url: https://nokodo.net
 repository_url: https://nokodo.net/github/open-webui-extensions
-version: 1.2.0-pr.2
+version: 1.2.0-pr.3
 required_open_webui_version: >= 0.5.0
 funding_url: https://ko-fi.com/nokodo
 license: see extension documentation file `auto_memory.md` (License section) for the licensing terms.
@@ -1174,6 +1174,33 @@ class Filter:
             self.log("need at least 2 messages for context", level="debug")
             return
         self.log(f"flow started. user ID: {user.id}", level="debug")
+
+        # --- RUNTIME CONFIGURATION CHECK ---
+        # 1. Check consistency for Zero Config Mode
+        # Determine if user wanted to use Ollama (User > Admin preference)
+        use_ollama = (
+            self.user_valves.use_ollama_backend
+            if self.user_valves.use_ollama_backend is not None
+            else self.valves.use_ollama_backend
+        )
+
+        # Case A: User enabled Zero Config, but Outlet failed to find the internal URL
+        if use_ollama and not override_api_url:
+            msg = "Auto Memory Error: Zero Config enabled but internal Ollama URL could not be detected."
+            self.log(msg, level="error")
+            if self.user_valves.show_status:
+                await emit_status(msg, emitter=emitter, status="error")
+            return
+
+        # Case B: Standard Mode (No Zero Config), but API Key is missing
+        effective_api_key = self.user_valves.api_key or self.valves.api_key
+        if not override_api_url and not effective_api_key:
+            msg = "Auto Memory Setup: Configuration missing. Please set an OpenAI API Key or enable 'Use Ollama Backend'."
+            self.log(msg, level="warning")
+            if self.user_valves.show_status:
+                await emit_status(msg, emitter=emitter, status="error")
+            return
+        # -----------------------------------
 
         related_memories = await self.get_related_memories(messages=messages, user=user)
 
