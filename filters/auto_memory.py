@@ -5,7 +5,7 @@ description: automatically identify and store valuable information from chats as
 author_email: nokodo@nokodo.net
 author_url: https://nokodo.net
 repository_url: https://nokodo.net/github/open-webui-extensions
-version: 1.2.0-pr.3
+version: 1.2.0-pr.5
 required_open_webui_version: >= 0.5.0
 funding_url: https://ko-fi.com/nokodo
 license: see extension documentation file `auto_memory.md` (License section) for the licensing terms.
@@ -740,14 +740,30 @@ class Filter:
         - If `response_model` is not provided, returns raw text.
         """
 
-        user_has_own_key = bool(
-            self.user_valves.api_key and self.user_valves.api_key.strip()
-        )
-
+        # --- Configuration Resolution ---
         if override_api_url:
+            # Zero Config Mode: use injected overrides directly.
+            # We strictly forbid falling back to global valves to avoid sending local requests to wrong endpoints.
             api_url = override_api_url
-            self.log(f"using overridden api url: {api_url}", level="debug")
+            model_name = override_model
+            api_key = "ollama"  # Dummy key required by SDK for local endpoints
+
+            if not model_name:
+                raise ValueError(
+                    "Zero Config enabled but no model detected via chat context or fixed model valve."
+                )
+
+            self.log(
+                f"using zero config backend: url={api_url}, model={model_name}",
+                level="debug",
+            )
+
         else:
+            # Standard Mode: resolve via Valves (Original Logic)
+            user_has_own_key = bool(
+                self.user_valves.api_key and self.user_valves.api_key.strip()
+            )
+
             api_url = self.get_restricted_user_valve(
                 user_valve_value=self.user_valves.openai_api_url,
                 admin_fallback=self.valves.openai_api_url,
@@ -755,10 +771,6 @@ class Filter:
                 valve_name="openai_api_url",
             ).rstrip("/")
 
-        if override_model:
-            model_name = override_model
-            self.log(f"using overridden model: {model_name}", level="debug")
-        else:
             model_name = self.get_restricted_user_valve(
                 user_valve_value=self.user_valves.model,
                 admin_fallback=self.valves.model,
@@ -766,10 +778,8 @@ class Filter:
                 valve_name="model",
             )
 
-        if override_api_url:
-            api_key = "ollama"
-        else:
             api_key = self.user_valves.api_key or self.valves.api_key
+        # -------------------------------
 
         if "gpt-5" in model_name:
             temperature = 1.0
@@ -1409,42 +1419,57 @@ class Filter:
 
         if use_ollama:
             try:
-                # 2. Auto-detect Ollama URL from internal state
-                if __request__ and hasattr(__request__.app.state, "_state"):
-                    state_dict = __request__.app.state._state
-                    ollama_urls = state_dict.get("OLLAMA_BASE_URLS", [])
+                # 2. Auto-detect Ollama URL
+                # We try multiple locations to be robust across OWUI versions
+                ollama_urls = []
+                if __request__:
+                    # Attempt 1: Direct attribute on state (Standard)
+                    ollama_urls = getattr(__request__.app.state, "OLLAMA_BASE_URLS", [])
 
-                    if ollama_urls:
-                        # Construct /v1 endpoint from the first configured Ollama URL
-                        base_url = ollama_urls[0].rstrip("/")
-                        override_api_url = f"{base_url}/v1"
-
-                        # 3. Determine Model for Ollama Mode
-                        # Priority: User Fixed -> Admin Fixed -> Current Chat Model
-                        if self.user_valves.ollama_fixed_model:
-                            override_model = self.user_valves.ollama_fixed_model
-                        elif self.valves.ollama_fixed_model:
-                            override_model = self.valves.ollama_fixed_model
-                        else:
-                            override_model = body.get("model")
-
-                        self.log(
-                            f"Zero Config Mode: using local Ollama {override_api_url} with model '{override_model}'",
-                            level="info",
+                    # Attempt 2: Inside config object (Alternative)
+                    if not ollama_urls and hasattr(__request__.app.state, "config"):
+                        ollama_urls = getattr(
+                            __request__.app.state.config, "OLLAMA_BASE_URLS", []
                         )
+
+                    # Attempt 3: Fallback to direct dict access if state acts like dict (User report)
+                    if not ollama_urls and hasattr(__request__.app.state, "_state"):
+                        ollama_urls = __request__.app.state._state.get(
+                            "OLLAMA_BASE_URLS", []
+                        )
+
+                if ollama_urls:
+                    # Construct /v1 endpoint from the first configured Ollama URL
+                    # Handle case where it might not be a list (defensive)
+                    if isinstance(ollama_urls, str):
+                        base_url = ollama_urls.rstrip("/")
                     else:
-                        self.log(
-                            "use_ollama_backend is active but no OLLAMA_BASE_URLS found in state",
-                            level="warning",
-                        )
+                        base_url = ollama_urls[0].rstrip("/")
+
+                    override_api_url = f"{base_url}/v1"
+
+                    # 3. Determine Model for Ollama Mode
+                    if self.user_valves.ollama_fixed_model:
+                        override_model = self.user_valves.ollama_fixed_model
+                    elif self.valves.ollama_fixed_model:
+                        override_model = self.valves.ollama_fixed_model
+                    else:
+                        override_model = body.get("model")
+
+                    self.log(
+                        f"Zero Config Mode: using local Ollama {override_api_url} with model '{override_model}'",
+                        level="info",
+                    )
                 else:
                     self.log(
-                        "use_ollama_backend is active but request state is inaccessible",
+                        "use_ollama_backend is active but OLLAMA_BASE_URLS not found in request state",
                         level="warning",
                     )
+
             except Exception as e:
                 self.log(f"Failed to auto-detect Ollama config: {e}", level="error")
 
+        # Start the background task with specific overrides
         _run_detached(
             self.auto_memory(
                 body.get("messages", []),
